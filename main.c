@@ -144,6 +144,8 @@ typedef struct {
     Ghost *death_by_ghost;
     int ghost_phase;
 
+    float red_ghost_speed_multiplier;
+
     float ghost_scatter_timer;
     float ghost_scatter_target_time;
 
@@ -305,7 +307,7 @@ static inline float get_ghost_speed(Ghost *ghost) {
             return SPEED_GHOST_LEAVING;
         case GHOST_STATE_OUTSIDE:
             if (ghost == &state->ghosts[0]) {
-                return SPEED_GHOST_OUTSIDE * 1.2f;
+                return SPEED_GHOST_OUTSIDE * state->red_ghost_speed_multiplier;
             }
             return SPEED_GHOST_OUTSIDE;
         case GHOST_STATE_FRIGHTENED:
@@ -469,6 +471,7 @@ void level_setup() {
     state->level_scatter_max = get_level_var_decreasing(10, 4);
     state->level_chase_min = get_level_var_increasing(10,50);
     state->level_chase_max = get_level_var_increasing(20,100);
+    state->red_ghost_speed_multiplier = get_level_var_increasing(1.2f, 1.5f);
 
     state->ghost_scatter_timer = 0.0f;
     state->ghost_scatter_target_time = GetRandomValue(state->level_scatter_min, state->level_scatter_max);
@@ -625,6 +628,8 @@ void player_on_position_new() {
         state->dot_count--;
 
         state->ghost_phase = PHASE_FRIGHTENED;
+        state->ghost_frightened_timer = 0.0f;
+
         for (int i = 0; i < GHOST_COUNT; i++) {
             Ghost *ghost = &state->ghosts[i];
             switch (ghost->state) {
@@ -632,7 +637,6 @@ void player_on_position_new() {
                     break;
                 case GHOST_STATE_OUTSIDE:
                     ghost->state = GHOST_STATE_FRIGHTENED;
-                    state->ghost_frightened_timer = 0.0f;
                     break;
             }
         }
@@ -783,7 +787,7 @@ void update(void) {
                     if (!has_flag(requested_position, FLAG_WALL)) {
                         player->direction = player->requested_direction;
                     }
-                } else {
+                } else if ((player->position.x != 0) && (player->position.x != GRID_WIDTH - 1)) {
                     GridPosition intermediate_position = get_position_in_direction(player->position, player->direction, 1);
                     if (!has_flag(intermediate_position, FLAG_WALL)) {
                         GridPosition requested_position = get_position_in_direction(intermediate_position, player->requested_direction, 1);
@@ -926,7 +930,33 @@ void update(void) {
 
                 Surroundings surroundings = {0};
                 scan_surroundings(ghost->position, ghost->direction, &surroundings);
-                ghost->direction = get_best_direction_towards_target(&surroundings, ghost->target);
+
+                if ((ghost->position.x == ghost->target.x) &&
+                    (ghost->position.y == ghost->target.y) &&
+                    (ghost->position.x == state->player.position.x) &&
+                    (ghost->position.y == state->player.position.y)
+                ) {
+
+                    // so close that the player and the ghost are in the same cell, but not close enough for death
+                    // "get_best_direction_towards_target" returns weird results in this case
+                    // so at this distance we simply take the player direction
+                    // this can be exploited if someone is extremely frame-perfect good
+
+                    bool direction_available = false;
+                    for (int i = 0; i < surroundings.count; i++) {
+                        if (state->player.direction == surroundings.directions[i]) {
+                            direction_available = true;
+                        }
+                    }
+
+                    if (direction_available) {
+                        ghost->direction = state->player.direction;
+                    } else {
+                        ghost->direction = get_best_direction_towards_target(&surroundings, ghost->target);
+                    }
+                } else {
+                    ghost->direction = get_best_direction_towards_target(&surroundings, ghost->target);
+                }
                 ASSERT(ghost->direction != DIRECTION_NONE);
             } break;
             case GHOST_STATE_FRIGHTENED: {
