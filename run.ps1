@@ -1,7 +1,6 @@
 param (
     [switch]$debug,
-    [switch]$gdb,
-    [switch]$gcc
+    [switch]$gdb
 )
 
 function log {
@@ -15,7 +14,12 @@ function log {
     Write-Host " )" -ForegroundColor Yellow
 }
 
-$output_exe = "./build/deathbird.exe"
+$build_dir = "./build/"
+if (-not (Test-Path $build_dir)) {
+    New-Item -ItemType Directory -Path $build_dir
+}
+
+$output_exe = "./build/drug-pac.exe"
 $input_c = "./main.c"
 
 $args = @()
@@ -46,9 +50,6 @@ $args += @(
 
 log "Building $input_c"
 
-# Write-Host '====GCC===='
-# & gcc @args
-# Write-Host '====CLANG===='
 & clang @args
 
 # exit 0
