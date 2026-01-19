@@ -467,10 +467,10 @@ void level_setup() {
     state->level_idx++;
     state->level_intro = 0;
 
-    state->level_scatter_min = get_level_var_decreasing(5, 2);
-    state->level_scatter_max = get_level_var_decreasing(10, 4);
-    state->level_chase_min = get_level_var_increasing(10,50);
-    state->level_chase_max = get_level_var_increasing(20,100);
+    state->level_scatter_min = get_level_var_decreasing(2, 0);
+    state->level_scatter_max = get_level_var_decreasing(5, 1);
+    state->level_chase_min = get_level_var_increasing(5,10);
+    state->level_chase_max = get_level_var_increasing(10,20);
     state->red_ghost_speed_multiplier = get_level_var_increasing(1.2f, 1.5f);
 
     state->ghost_scatter_timer = 0.0f;
