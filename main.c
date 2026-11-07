@@ -9,7 +9,7 @@
 #define GRID_WIDTH 19
 #define GRID_HEIGHT 22
 
-typedef struct GridPosition {
+typedef struct {
     int x; int y;
 } GridPosition;
 
@@ -24,11 +24,15 @@ typedef struct GridPosition {
 #define FLAG_WALL (1 << 0)
 #define FLAG_DOT (1 << 1)
 #define FLAG_BIG_DOT (1 << 2)
-#define FLAG_OUT_OF_BOUNDS (1 << 3)
-#define FLAG_WALL_TO_RIGHT (1 << 4)
-#define FLAG_WALL_ABOVE (1 << 5)
-#define FLAG_WALL_TO_LEFT (1 << 6)
-#define FLAG_WALL_BELOW (1 << 7)
+#define FLAG_EYEBALL_TOP_RIGHT (1 << 3)
+#define FLAG_EYEBALL_TOP_LEFT (1 << 4)
+#define FLAG_EYEBALL_BOTTOM_RIGHT (1 << 5)
+#define FLAG_EYEBALL_BOTTOM_LEFT (1 << 6)
+#define FLAG_OUT_OF_BOUNDS (1 << 7)
+#define FLAG_WALL_TO_RIGHT (1 << 8)
+#define FLAG_WALL_ABOVE (1 << 9)
+#define FLAG_WALL_TO_LEFT (1 << 10)
+#define FLAG_WALL_BELOW (1 << 11)
 
 #define SPEED_MULTIPLIER 6.0f
 #define SPEED_PLAYER (1.0f * SPEED_MULTIPLIER)
@@ -55,11 +59,17 @@ typedef struct GridPosition {
 #define COLOR_FLOOR ((Color){ 0x00,0x00,0x00,255})
 #define COLOR_WALL ((Color){ 0x19,0x19,0xa6,255})
 #define COLOR_GHOST_HOUSE_DOOR ((Color){255,0,0,255})
-#define COLOR_FRIGHTENED ((Color){0x21,0x21,0xde,255})
+#define COLOR_FRIGHTENED ((Color){0x00,0x00,0xff,255})
+
+#define SCORE_DOT 1
+#define SCORE_BIG_DOT 5
+#define SCORE_GHOST 20
 
 #define GAP_ANIMATION_SPEED 25
 #define GAP_SIZE_MULTIPLIER 75
 #define HALF_GAP_SIZE_MULTIPLIER (GAP_SIZE_MULTIPLIER / 2)
+
+#define EYEBALL_DURATION 5.0f
 
 #define LEVEL_INTRO_LENGTH 1.0f
 
@@ -121,14 +131,12 @@ typedef struct {
     float fraction_position;
     int direction;
     Color color;
-    Texture texture;
     int wait_amount;
 } Ghost;
 
 typedef struct {
     float global_sine;
     float global_sine_timer;
-    float global_cosine;
 
     int level_idx;
 
@@ -154,19 +162,20 @@ typedef struct {
 
     float ghost_frightened_timer;
     float ghost_frightened_target_time;
-
-    Texture ghost_frightened_texture;
-    Texture ghost_returning_texture;
+    bool ghost_blinking;
 
     int grid[GRID_WIDTH][GRID_HEIGHT];
 
     int dot_count;
-
-    Texture texture;
+    int score;
+    int ghost_score_multiplier;
 
     float render_x_offset;
 
     float level_intro;
+
+    int eyeball_location;
+    float eyeball_timer;
 } State;
 
 State *state;
@@ -249,6 +258,16 @@ void debug_line(GridPosition a, GridPosition b, Color color) {
 #define ASSERT(condition) ((void)(condition))
 #define GET_FRAME_TIME() GetFrameTime()
 #endif
+
+Vector2 normalize_vec2(Vector2 v) {
+    float magnitude = sqrtf((v.x * v.x) + (v.y * v.y));
+
+    Vector2 result;
+    result.x = v.x / magnitude;
+    result.y = v.y / magnitude;
+
+    return result;
+}
 
 static inline bool grid_position_eq(GridPosition a, GridPosition b) {
     return a.x == b.x && a.y == b.y;
@@ -463,7 +482,6 @@ float get_level_var_decreasing(float start, float target) {
 }
 
 void level_setup() {
-    state->death_by_ghost = NULL;
     state->level_idx++;
     state->level_intro = 0;
 
@@ -471,7 +489,7 @@ void level_setup() {
     state->level_scatter_max = get_level_var_decreasing(5, 1);
     state->level_chase_min = get_level_var_increasing(5,10);
     state->level_chase_max = get_level_var_increasing(10,20);
-    state->red_ghost_speed_multiplier = get_level_var_increasing(1.2f, 1.5f);
+    state->red_ghost_speed_multiplier = get_level_var_increasing(1.0f, 1.2f);
 
     state->ghost_scatter_timer = 0.0f;
     state->ghost_scatter_target_time = GetRandomValue(state->level_scatter_min, state->level_scatter_max);
@@ -480,8 +498,8 @@ void level_setup() {
 
     char byte_grid[GRID_WIDTH][GRID_HEIGHT] = {
         "########## ###########",
-        "#.*....### ###..*#...#",
-        "#.##.#.### ###.#...#.#",
+        "#.*....#0# #2#..*#...#",
+        "#.##.#.#0# #2#.#...#.#",
         "#.##.#.### ###.###.#.#",
         "#..................#.#",
         "#.##.##### ###.#.###.#",
@@ -495,8 +513,8 @@ void level_setup() {
         "#.##.#####.###.#.###.#",
         "#..................#.#",
         "#.##.#.### ###.###.#.#",
-        "#.##.#.### ###.#...#.#",
-        "#.*....### ###..*#...#",
+        "#.##.#.#1# #3#.#...#.#",
+        "#.*....#1# #3#..*#...#",
         "########## ###########",
     };
     for (int x = 0; x < GRID_WIDTH; x++) {
@@ -512,6 +530,18 @@ void level_setup() {
                 case '*':
                     state->dot_count++;
                     state->grid[x][y] = FLAG_BIG_DOT;
+                    break;
+                case '0':
+                    state->grid[x][y] = FLAG_EYEBALL_TOP_RIGHT;
+                    break;
+                case '1':
+                    state->grid[x][y] = FLAG_EYEBALL_TOP_LEFT;
+                    break;
+                case '2':
+                    state->grid[x][y] = FLAG_EYEBALL_BOTTOM_RIGHT;
+                    break;
+                case '3':
+                    state->grid[x][y] = FLAG_EYEBALL_BOTTOM_LEFT;
                     break;
                 default:
                     state->grid[x][y] = FLAG_NONE;
@@ -592,16 +622,35 @@ void level_setup() {
     }
 }
 
+void update_eyeball_location() {
+    int new_location = -1;
+    do {
+        switch (GetRandomValue(0, 3)) {
+            default:
+                ASSERT(false);
+                break;
+            case 0:
+                new_location = FLAG_EYEBALL_TOP_RIGHT;
+                break;
+            case 1:
+                new_location = FLAG_EYEBALL_TOP_LEFT;
+                break;
+            case 2:
+                new_location = FLAG_EYEBALL_BOTTOM_RIGHT;
+                break;
+            case 3:
+                new_location = FLAG_EYEBALL_BOTTOM_LEFT;
+                break;
+        }
+    } while (state->eyeball_location == new_location);
+
+    state->eyeball_location = new_location;
+}
+
 void init(void) {
+    state->death_by_ghost = NULL;
+    update_eyeball_location();
     level_setup();
-
-    state->ghost_frightened_texture = LoadTexture("frightened.png");
-    state->ghost_returning_texture = LoadTexture("returning.png");
-
-    state->ghosts[GHOST_BLINKY].texture = LoadTexture("blinky.png");
-    state->ghosts[GHOST_PINKY].texture = LoadTexture("pinky.png");
-    state->ghosts[GHOST_INKY].texture = LoadTexture("inky.png");
-    state->ghosts[GHOST_CLYDE].texture = LoadTexture("clyde.png");
 }
 
 int get_opposite_direction(int direction) {
@@ -623,9 +672,12 @@ void player_on_position_new() {
     if (has_flag(player->position, FLAG_DOT)) {
         remove_flag(player->position, FLAG_DOT);
         state->dot_count--;
+        state->score += SCORE_DOT;
     } else if (has_flag(player->position, FLAG_BIG_DOT)) {
         remove_flag(player->position, FLAG_BIG_DOT);
         state->dot_count--;
+        state->score += SCORE_BIG_DOT;
+        state->ghost_score_multiplier = 1;
 
         state->ghost_phase = PHASE_FRIGHTENED;
         state->ghost_frightened_timer = 0.0f;
@@ -686,33 +738,139 @@ int get_best_direction_towards_target(Surroundings *surroundings, GridPosition t
     return best_direction;
 }
 
-void update(void) {
-    if (state->level_intro < LEVEL_INTRO_LENGTH) {
-        return;
+void input() {
+    if (IsKeyPressed(KEY_RIGHT)) {
+        state->player.requested_direction = DIRECTION_RIGHT;
+    } else if (IsKeyPressed(KEY_UP)) {
+        state->player.requested_direction = DIRECTION_UP;
+    } else if (IsKeyPressed(KEY_LEFT)) {
+        state->player.requested_direction = DIRECTION_LEFT;
+    } else if (IsKeyPressed(KEY_DOWN)) {
+        state->player.requested_direction = DIRECTION_DOWN;
     }
 
-    if (state->death_by_ghost) {
-        return;
+#if DEBUG
+    if (IsKeyPressed(KEY_S)) {
+        toggle_slowmotion();
     }
+    if (IsKeyPressed(KEY_L)) {
+        toggle_lines();
+    }
+#endif
+}
 
-    float delta_time = GET_FRAME_TIME();
+void update_player() {
+    Player *player = &state->player;
 
-    {
-        state->global_sine_timer += delta_time;
-
-        if (state->global_sine_timer > 1.0f) {
-            state->global_sine_timer = 0.0f;
+    if (!is_out_of_bounds(state->player.position)) {
+        if (player->direction != player->requested_direction) {
+            int opposite_direction = get_opposite_direction(player->direction);
+            if (player->requested_direction == opposite_direction) {
+                GridPosition requested_position = get_position_in_direction(state->player.position, opposite_direction, 1);
+                if (!has_flag(requested_position, FLAG_WALL)) {
+                    player->direction = player->requested_direction;
+                }
+            } else if ((player->position.x != 0) && (player->position.x != GRID_WIDTH - 1)) {
+                GridPosition intermediate_position = get_position_in_direction(player->position, player->direction, 1);
+                if (!has_flag(intermediate_position, FLAG_WALL)) {
+                    GridPosition requested_position = get_position_in_direction(intermediate_position, player->requested_direction, 1);
+                    if (!has_flag(requested_position, FLAG_WALL)) {
+                        player->position = intermediate_position;
+                        player->direction = player->requested_direction;
+                        player_on_position_new();
+                    }
+                } else {
+                    GridPosition requested_position = get_position_in_direction(player->position, player->requested_direction, 1);
+                    if (!has_flag(requested_position, FLAG_WALL)) {
+                        player->direction = player->requested_direction;
+                        player_on_position_new();
+                    }
+                }
+            }
+            GridPosition requested_position = get_position_in_direction(state->player.position, state->player.requested_direction, 1);
+            if (!has_flag(requested_position, FLAG_WALL)) {
+                state->player.direction = state->player.requested_direction;
+            }
         }
-
-        float x = state->global_sine_timer * PI * 2;
-        state->global_sine = sinf(x);
-        state->global_cosine = sinf(x);
     }
 
+    GridPosition next_position = get_position_in_direction(player->position, player->direction, 1);
+
+    if (!has_flag(next_position, FLAG_WALL)) {
+        switch (player->direction) {
+            case DIRECTION_RIGHT:
+                player->fraction_position.x += SPEED_PLAYER * GetFrameTime();
+                player->fraction_position.y = 0.0f;
+                if (player->fraction_position.x > 1.0f) {
+                    player->position.x++;
+                    player_on_position_new();
+                }
+                break;
+            case DIRECTION_UP:
+                player->fraction_position.x = 0.0f;
+                player->fraction_position.y -= SPEED_PLAYER * GetFrameTime();
+                if (player->fraction_position.y < (-1.0f)) {
+                    player->position.y--;
+                    player_on_position_new();
+                }
+                break;
+            case DIRECTION_LEFT:
+                player->fraction_position.x -= SPEED_PLAYER * GetFrameTime();
+                player->fraction_position.y = 0.0f;
+                if (player->fraction_position.x < (-1.0f)) {
+                    player->position.x--;
+                    player_on_position_new();
+                }
+                break;
+            case DIRECTION_DOWN:
+                player->fraction_position.x = 0.0f;
+                player->fraction_position.y += SPEED_PLAYER * GetFrameTime();
+                if (player->fraction_position.y > 1.0f) {
+                    player->position.y++;
+                    player_on_position_new();
+                }
+                break;
+        }
+    } else {
+        player->fraction_position = (Vector2){0};
+    }
+}
+
+void update_ghost_blinking() {
+    state->ghost_blinking = false;
+
+    if (state->ghost_phase != PHASE_FRIGHTENED) {
+        return;
+    }
+
+    float x = state->ghost_frightened_target_time - state->ghost_frightened_timer;
+    float frequency;
+
+    if (x < 1) {
+        frequency = 1.0f / 8;
+    } else if (x < 2) {
+        frequency = 1.0f / 4;
+    } else if (x < 4) {
+        frequency = (1.0f / 2);
+    } else {
+        return;
+    }
+
+    for (int i = 0; true; i += 2) {
+        if ((i * frequency) > x) {
+            if (((i - 1) * frequency) < x) {
+                state->ghost_blinking = true;
+            }
+            return;
+        }
+    }
+}
+
+void update_ghosts() {
     switch (state->ghost_phase) {
         default: break;
         case PHASE_SCATTER:
-            state->ghost_scatter_timer += delta_time;
+            state->ghost_scatter_timer += GetFrameTime();
             if (state->ghost_scatter_timer > state->ghost_scatter_target_time) {
                 state->ghost_scatter_timer = 0.0f;
                 state->ghost_phase = PHASE_CHASE;
@@ -723,7 +881,7 @@ void update(void) {
             }
             break;
         case PHASE_CHASE:
-            state->ghost_chase_timer += delta_time;
+            state->ghost_chase_timer += GetFrameTime();
             if (state->ghost_chase_timer > state->ghost_chase_target_time) {
                 state->ghost_chase_timer = 0.0f;
                 state->ghost_phase = PHASE_SCATTER;
@@ -734,7 +892,7 @@ void update(void) {
             }
             break;
         case PHASE_FRIGHTENED:
-            state->ghost_frightened_timer += delta_time;
+            state->ghost_frightened_timer += GetFrameTime();
             if (state->ghost_frightened_timer > state->ghost_frightened_target_time) {
                 state->ghost_frightened_timer = 0.0f;
                 for (int i = 0; i < GHOST_COUNT; i++) {
@@ -752,106 +910,7 @@ void update(void) {
             break;
     }
 
-    if (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) {
-        if (IsKeyPressed(KEY_RIGHT)) {
-            int monitor = GetCurrentMonitor();
-            int monitor_width = GetMonitorWidth(monitor);
-            int screen_width = GetScreenWidth();
-            SetWindowPosition(monitor_width - screen_width, 0);
-        }
-        if (IsKeyPressed(KEY_LEFT)) {
-            SetWindowPosition(0, 0);
-        }
-    }
-
-    if (IsKeyPressed(KEY_RIGHT)) {
-        state->player.requested_direction = DIRECTION_RIGHT;
-    } else if (IsKeyPressed(KEY_UP)) {
-        state->player.requested_direction = DIRECTION_UP;
-    } else if (IsKeyPressed(KEY_LEFT)) {
-        state->player.requested_direction = DIRECTION_LEFT;
-    } else if (IsKeyPressed(KEY_DOWN)) {
-        state->player.requested_direction = DIRECTION_DOWN;
-    }
-
-    {
-        // player movement
-
-        Player *player = &state->player;
-
-        if (!is_out_of_bounds(state->player.position)) {
-            if (player->direction != player->requested_direction) {
-                int opposite_direction = get_opposite_direction(player->direction);
-                if (player->requested_direction == opposite_direction) {
-                    GridPosition requested_position = get_position_in_direction(state->player.position, opposite_direction, 1);
-                    if (!has_flag(requested_position, FLAG_WALL)) {
-                        player->direction = player->requested_direction;
-                    }
-                } else if ((player->position.x != 0) && (player->position.x != GRID_WIDTH - 1)) {
-                    GridPosition intermediate_position = get_position_in_direction(player->position, player->direction, 1);
-                    if (!has_flag(intermediate_position, FLAG_WALL)) {
-                        GridPosition requested_position = get_position_in_direction(intermediate_position, player->requested_direction, 1);
-                        if (!has_flag(requested_position, FLAG_WALL)) {
-                            player->position = intermediate_position;
-                            player->direction = player->requested_direction;
-                            player_on_position_new();
-                        }
-                    } else {
-                        GridPosition requested_position = get_position_in_direction(player->position, player->requested_direction, 1);
-                        if (!has_flag(requested_position, FLAG_WALL)) {
-                            player->direction = player->requested_direction;
-                            player_on_position_new();
-                        }
-                    }
-                }
-                GridPosition requested_position = get_position_in_direction(state->player.position, state->player.requested_direction, 1);
-                if (!has_flag(requested_position, FLAG_WALL)) {
-                    state->player.direction = state->player.requested_direction;
-                }
-            }
-        }
-
-        GridPosition next_position = get_position_in_direction(player->position, player->direction, 1);
-
-        if (!has_flag(next_position, FLAG_WALL)) {
-            switch (player->direction) {
-                case DIRECTION_RIGHT:
-                    player->fraction_position.x += SPEED_PLAYER * delta_time;
-                    player->fraction_position.y = 0.0f;
-                    if (player->fraction_position.x > 1.0f) {
-                        player->position.x++;
-                        player_on_position_new();
-                    }
-                    break;
-                case DIRECTION_UP:
-                    player->fraction_position.x = 0.0f;
-                    player->fraction_position.y -= SPEED_PLAYER * delta_time;
-                    if (player->fraction_position.y < (-1.0f)) {
-                        player->position.y--;
-                        player_on_position_new();
-                    }
-                    break;
-                case DIRECTION_LEFT:
-                    player->fraction_position.x -= SPEED_PLAYER * delta_time;
-                    player->fraction_position.y = 0.0f;
-                    if (player->fraction_position.x < (-1.0f)) {
-                        player->position.x--;
-                        player_on_position_new();
-                    }
-                    break;
-                case DIRECTION_DOWN:
-                    player->fraction_position.x = 0.0f;
-                    player->fraction_position.y += SPEED_PLAYER * delta_time;
-                    if (player->fraction_position.y > 1.0f) {
-                        player->position.y++;
-                        player_on_position_new();
-                    }
-                    break;
-            }
-        } else {
-            player->fraction_position = (Vector2){0};
-        }
-    }
+    update_ghost_blinking();
 
     for (int i = 0; i < GHOST_COUNT; i++) {
         Ghost *ghost = &state->ghosts[i];
@@ -867,6 +926,8 @@ void update(void) {
                     break;
                 case GHOST_STATE_FRIGHTENED:
                     ghost->state = GHOST_STATE_RETURNING;
+                    state->score += SCORE_GHOST * state->ghost_score_multiplier;
+                    state->ghost_score_multiplier *= 2;
                     break;
                 default:
                     state->death_by_ghost = ghost;
@@ -874,7 +935,7 @@ void update(void) {
             }
         }
 
-        ghost->fraction_position += delta_time * get_ghost_speed(ghost);
+        ghost->fraction_position += GetFrameTime() * get_ghost_speed(ghost);
         if (ghost->fraction_position < 1.0f) {
             continue;
         }
@@ -984,18 +1045,127 @@ void update(void) {
             } break;
         }
     }
+}
 
-#if DEBUG
-    if (IsKeyPressed(KEY_S)) {
-        toggle_slowmotion();
+void update_eyeball() {
+    state->eyeball_timer += GetFrameTime();
+    if (state->eyeball_timer > EYEBALL_DURATION) {
+        state->eyeball_timer = 0;
+        update_eyeball_location();
     }
-    if (IsKeyPressed(KEY_L)) {
-        toggle_lines();
+}
+
+void update(void) {
+    if (state->level_intro < LEVEL_INTRO_LENGTH) {
+        return;
     }
-#endif
+
+    if (state->death_by_ghost) {
+        return;
+    }
+
+    state->global_sine_timer += GetFrameTime();
+
+    if (state->global_sine_timer > 1.0f) {
+        state->global_sine_timer = 0.0f;
+    }
+
+    state->global_sine = sinf(state->global_sine_timer * PI * 2);
 
     float level_width = get_cell_size() * GRID_WIDTH;
     state->render_x_offset = (GetScreenWidth() - level_width) / 2;
+
+    update_player();
+    update_ghosts();
+    update_eyeball();
+}
+
+Color blend_influences(Vector2 position, Color base_color) {
+    position.x += get_half_cell_size();
+    position.y += get_half_cell_size();
+
+    float r = base_color.r * 0.5f; // base color is dim
+    float g = base_color.g * 0.5f;
+    float b = base_color.b * 0.5f;
+
+    for (int i = 0; i < GHOST_COUNT; i++) {
+        Ghost *ghost = &state->ghosts[i];
+
+        switch (ghost->state) {
+            default:
+                break;
+            case GHOST_STATE_FRIGHTENED:
+                if (state->ghost_blinking) {
+                    break;
+                }
+                continue;
+            case GHOST_STATE_RETURNING:
+                continue;
+        }
+
+        Vector2 ghost_screen_position = get_ghost_screen_position(ghost);
+        float dx = ghost_screen_position.x - position.x;
+        float dy = ghost_screen_position.y - position.y;
+
+        // "normalize" range to have it consistent with window resizing
+        float multiplier = 50;
+        dx = (dx / get_cell_size()) * multiplier;
+        dy = (dy / get_cell_size()) * multiplier;
+
+        float dist = sqrtf(dx*dx + dy*dy);
+
+        float sigma = 70.0f; // controls spread
+        float weight = expf(-(dist*dist) / (2 * sigma*sigma));
+
+        // additive light effect
+        Color color = state->ghost_phase == GHOST_STATE_FRIGHTENED ? COLOR_FRIGHTENED : ghost->color;
+
+        r += color.r * weight;
+        g += color.g * weight;
+        b += color.b * weight;
+    }
+
+    // clamp to [0, 255]
+    if (r > 255) r = 255;
+    if (g > 255) g = 255;
+    if (b > 255) b = 255;
+
+    Color result;
+    result.r = (unsigned char)r;
+    result.g = (unsigned char)g;
+    result.b = (unsigned char)b;
+    result.a = 255;
+
+    return result;
+}
+
+Color hsv(float t) {
+    t = fmodf(t, 1.0f);
+    if (t < 0) t += 1.0f;
+
+    float h = t * 360.0f;   // hue (0–360)
+    float s = 1.0f;         // full saturation
+    float v = 1.0f;         // full brightness
+
+    float c = v * s;
+    float x = c * (1 - fabsf(fmodf(h / 60.0f, 2) - 1));
+    float m = v - c;
+
+    float r = 0, g = 0, b = 0;
+
+    if (h < 60)       { r = c; g = x; b = 0; }
+    else if (h < 120) { r = x; g = c; b = 0; }
+    else if (h < 180) { r = 0; g = c; b = x; }
+    else if (h < 240) { r = 0; g = x; b = c; }
+    else if (h < 300) { r = x; g = 0; b = c; }
+    else              { r = c; g = 0; b = x; }
+
+    return (Color){
+        (unsigned char)((r + m) * 255),
+        (unsigned char)((g + m) * 255),
+        (unsigned char)((b + m) * 255),
+        255
+    };
 }
 
 void render_noise(const char *text) {
@@ -1042,271 +1212,10 @@ void render_noise(const char *text) {
     DrawTextPro(GetFontDefault(), text, text_position, text_origin, 0, font_size, spacing, (Color){255,0,0,255});
 }
 
-void render_player(void) {
-    Player *player = &state->player;
-
-    static float gap = 0.0f;
-
-    float start_angle = 0.0f;
-    float end_angle = 0.0f;
-
-    gap += GET_FRAME_TIME() * GAP_ANIMATION_SPEED;
-    if (gap > PI * 2) {
-        gap = 0.0f;
-    }
-
-    float base_angle = 0.0f;
-    switch (player->direction) {
-        case DIRECTION_RIGHT:
-            base_angle = 0.0f;
-            break;
-        case DIRECTION_UP:
-            base_angle = 270.0f;
-            break;
-        case DIRECTION_LEFT:
-            base_angle = 180.0f;
-            break;
-        case DIRECTION_DOWN:
-            base_angle = 90.0f;
-            break;
-    }
-
-    start_angle = (base_angle + 360.0f)
-        - ((cosf(gap) + 1.0f) * HALF_GAP_SIZE_MULTIPLIER);
-
-    end_angle = base_angle
-        + ((cosf(gap) + 1.0f) * HALF_GAP_SIZE_MULTIPLIER);
-
-    DrawCircleSector(get_player_screen_position(), (get_half_cell_size() * 0.9f), start_angle, end_angle, 16, COLOR_PLAYER);
-}
-
-void render_ghost(Ghost *ghost) {
-    // Color color = ghost->color;
-    // switch (ghost->state) {
-    //     default:
-    //         break;
-    //     case GHOST_STATE_FRIGHTENED:
-    //     case GHOST_STATE_RETURNING:
-    //         color.r /= 2;
-    //         color.g /= 2;
-    //         color.b /= 2;
-    //         break;
-    // }
-    //
-    // float eye_size = get_cell_size() / 6;
-    // Color eye_color = (Color){255,255,255,255};
-    //
-    // float pupille_size = get_cell_size() / 12;
-    // float pupille_x = 0;
-    // float pupille_y = 0;
-    // Color pupille_color = (Color){0,0,0,255};
-    //
-    // float pupille_offset = eye_size / 2;
-    //
-    // if (ghost->state == GHOST_STATE_FRIGHTENED) {
-    //     float t = ghost->fraction_position * PI * 2;
-    //     pupille_x = pupille_offset * sinf(t);
-    //     pupille_y = pupille_offset * cosf(t);
-    // } else {
-    //     switch (ghost->direction) {
-    //         case DIRECTION_RIGHT: pupille_x = pupille_offset; break;
-    //         case DIRECTION_UP: pupille_y = -pupille_offset; break;
-    //         case DIRECTION_LEFT: pupille_x = -pupille_offset; break;
-    //         case DIRECTION_DOWN: pupille_y = pupille_offset; break;
-    //     }
-    // }
-    //
-    // switch (ghost->shape) {
-    //     case GHOST_SHAPE_TRAPEZOID: {
-    //         if (ghost->state != GHOST_STATE_RETURNING) {
-    //             const float o = get_eighth_cell_size();
-    //             Vector2 tl = { center.x - (o*3), center.y - (o*3) };
-    //             Vector2 bl = { center.x - (o*4), center.y + (o*3) };
-    //             Vector2 br = { center.x + (o*4), bl.y };
-    //             Vector2 tr = { center.x + (o*3), tl.y };
-    //
-    //             DrawTriangle(tl, bl, br, color);
-    //             DrawTriangle(tl, br, tr, color);
-    //         }
-    //
-    //         float eye_left = center.x - eye_size;
-    //         float eye_right = center.x + eye_size;
-    //
-    //         DrawCircle(eye_left, center.y, eye_size, eye_color);
-    //         DrawCircle(eye_right, center.y, eye_size, eye_color);
-    //
-    //         DrawCircle(eye_left + pupille_x, center.y + pupille_y, pupille_size, pupille_color);
-    //         DrawCircle(eye_right + pupille_x, center.y + pupille_y, pupille_size, pupille_color);
-    //     } break;
-    //     case GHOST_SHAPE_TRIANGLE: {
-    //         if (ghost->state != GHOST_STATE_RETURNING) {
-    //             float d = (2.0f * PI) / 3.0f;
-    //             Vector2 v[3];
-    //             for (int i = 0; i < 3; i++) {
-    //                 float value = (d * i) + (state->global_sine_timer * d * 4);
-    //                 v[i] = (Vector2) {
-    //                     .x = center.x + (sinf(value) * get_half_cell_size()),
-    //                     .y = center.y + (cosf(value) * get_half_cell_size()),
-    //                 };
-    //             }
-    //             DrawTriangle(v[0], v[1], v[2], color);
-    //         }
-    //         DrawCircle(center.x, center.y, eye_size, eye_color);
-    //         DrawCircle(center.x + pupille_x, center.y + pupille_y, pupille_size, pupille_color);
-    //     } break;
-    // }
-
-    Vector2 center = get_ghost_screen_position(ghost);
-
-    float scale = (get_cell_size() / (float)PNG_DIMENSIONS);
-
-    if (ghost == &state->ghosts[0]) {
-        scale *= 1.5f;
-    }
-
-    Rectangle src;
-    src.x = 0;
-    src.y = 0;
-    src.width = PNG_DIMENSIONS;
-    src.height = PNG_DIMENSIONS;
-
-    if (ghost->direction == DIRECTION_LEFT) {
-        src.x = PNG_DIMENSIONS;
-        src.width = -PNG_DIMENSIONS;
-    }
-
-    Rectangle dst;
-    dst.width = PNG_DIMENSIONS * scale;
-    dst.height = PNG_DIMENSIONS * scale;
-    dst.x = center.x;
-    dst.y = center.y;
-
-    Vector2 origin;
-    origin.x = dst.width / 2;
-    origin.y = dst.height / 2;
-
-    float rotation;
-    Color color = { 255, 255, 255, 255 };
-    Texture texture;
-
-    switch (ghost->direction) {
-        case DIRECTION_RIGHT:
-        case DIRECTION_LEFT: rotation = 0; break;
-        case DIRECTION_UP: rotation = 270; break;
-        case DIRECTION_DOWN: rotation = 90; break;
-        default: ASSERT(false);
-    }
-
-    switch (ghost->state) {
-        default:
-            texture = ghost->texture;
-            break;
-        case GHOST_STATE_FRIGHTENED: {
-            float flicker_speed = 0.0f;
-            if ((state->ghost_frightened_timer + 1) > state->ghost_frightened_target_time) {
-                flicker_speed = 0.05f;
-            } else if ((state->ghost_frightened_timer + 3) > state->ghost_frightened_target_time) {
-                flicker_speed = 0.1f;
-            }
-
-            if (flicker_speed) {
-                float x = state->ghost_frightened_target_time - state->ghost_frightened_timer;
-                if ((int)floorf(x / flicker_speed) % 2 == 0) {
-                    texture = state->ghost_frightened_texture;
-                } else {
-                    texture = ghost->texture;
-                }
-            } else {
-                texture = state->ghost_frightened_texture;
-            }
-        } break;
-        case GHOST_STATE_RETURNING:
-            texture = state->ghost_returning_texture;
-            break;
-    }
-
-    DrawTexturePro(texture, src, dst, origin, rotation, color);
-}
-
-Color blend_influences(Vector2 position, Color base_color) {
-    float r = base_color.r * 0.5f; // base color is dim
-    float g = base_color.g * 0.5f;
-    float b = base_color.b * 0.5f;
-
-    for (int i = 0; i < GHOST_COUNT; i++) {
-        Ghost *ghost = &state->ghosts[i];
-
-        switch (ghost->state) {
-            default:
-                break;
-            case GHOST_STATE_FRIGHTENED:
-            case GHOST_STATE_RETURNING:
-                continue;
-        }
-
-        Vector2 ghost_screen_position = get_ghost_screen_position(ghost);
-        float dx = ghost_screen_position.x - position.x;
-        float dy = ghost_screen_position.y - position.y;
-        float dist = sqrtf(dx*dx + dy*dy);
-
-        float sigma = 70.0f; // controls spread
-        float weight = expf(-(dist*dist) / (2 * sigma*sigma));
-
-        // additive light effect
-        r += ghost->color.r * weight;
-        g += ghost->color.g * weight;
-        b += ghost->color.b * weight;
-    }
-
-    // clamp to [0, 255]
-    if (r > 255) r = 255;
-    if (g > 255) g = 255;
-    if (b > 255) b = 255;
-
-    return (Color){ (unsigned char)r, (unsigned char)g, (unsigned char)b, 255 };
-}
-
-Color hsv(float t) {
-    t = fmodf(t, 1.0f);
-    if (t < 0) t += 1.0f;
-
-    float h = t * 360.0f;   // hue (0–360)
-    float s = 1.0f;         // full saturation
-    float v = 1.0f;         // full brightness
-
-    float c = v * s;
-    float x = c * (1 - fabsf(fmodf(h / 60.0f, 2) - 1));
-    float m = v - c;
-
-    float r = 0, g = 0, b = 0;
-
-    if (h < 60)       { r = c; g = x; b = 0; }
-    else if (h < 120) { r = x; g = c; b = 0; }
-    else if (h < 180) { r = 0; g = c; b = x; }
-    else if (h < 240) { r = 0; g = x; b = c; }
-    else if (h < 300) { r = x; g = 0; b = c; }
-    else              { r = c; g = 0; b = x; }
-
-    return (Color){
-        (unsigned char)((r + m) * 255),
-        (unsigned char)((g + m) * 255),
-        (unsigned char)((b + m) * 255),
-        255
-    };
-}
-
-void render(void) {
-    if (state->level_intro < LEVEL_INTRO_LENGTH) {
-        const char *text = TextFormat("LEVEL %i", state->level_idx);
-        render_noise(text);
-        state->level_intro += GetFrameTime();
-        return;
-    }
-
+void render_level() {
     float thickness_multiplier = get_eighth_cell_size();
     float thickness = thickness_multiplier + (thickness_multiplier + (state->global_sine * thickness_multiplier * 0.9f));
 
-    ClearBackground(COLOR_FLOOR);
     for (int x = 0; x < GRID_WIDTH; x++) {
         float sin_offset = sinf((state->global_sine_timer * PI * 2) + x) * get_eighth_cell_size();
         Color column_color = hsv((float)x/GRID_WIDTH);
@@ -1374,6 +1283,65 @@ void render(void) {
                         dot_radius,
                         column_color
                     );
+                } else if (has_flag(cell, state->eyeball_location)) {
+                    Vector2 eye_center;
+                    eye_center.x = state->render_x_offset + (x * get_cell_size()) + get_half_cell_size();
+                    eye_center.y = (y * get_cell_size()) + get_half_cell_size();
+
+                    const float eye_radius = get_half_cell_size() * 0.8f;
+
+                    const float pupille_radius = eye_radius / 3;
+
+                    float pupille_target_offset = eye_radius * 0.5f;
+                    float pupille_offset;
+                    float appear_disappear_time = 0.5f;
+                    float redirect_time = 0.5f;
+                    float redirect_time_absolute = appear_disappear_time + redirect_time;
+
+                    float darkness = 1.0f;
+
+                    if ((state->eyeball_timer < appear_disappear_time) || (state->eyeball_timer > EYEBALL_DURATION - appear_disappear_time)) { pupille_offset = 0.0f;
+                        pupille_offset = 0;
+                        float t;
+                        if (state->eyeball_timer < EYEBALL_DURATION / 2) {
+                            t = state->eyeball_timer;
+                        } else {
+                            t = (state->eyeball_timer - EYEBALL_DURATION) * (-1.0f);
+                        }
+                        darkness = t * (1.0f / appear_disappear_time);
+                    } else if ((state->eyeball_timer < redirect_time_absolute) || (state->eyeball_timer > EYEBALL_DURATION - redirect_time_absolute)) {
+                        float t;
+                        if (state->eyeball_timer < EYEBALL_DURATION / 2.0f) {
+                            t = state->eyeball_timer - appear_disappear_time;
+                        } else {
+                            t = (state->eyeball_timer - EYEBALL_DURATION + appear_disappear_time) * (-1.0f);
+                        }
+                        pupille_offset = t * (1 / redirect_time) * pupille_target_offset;
+                    } else {
+                        pupille_offset = pupille_target_offset;
+                    }
+
+                    int inner = 255 * darkness;
+                    Color inner_color = {inner,inner,inner,255};
+                    int outer = 127 * darkness;
+                    Color outer_color = {outer,outer,outer,255};
+                    Color pupille_color = {0,0,0,255};
+
+                    DrawCircleGradient(eye_center.x, eye_center.y, eye_radius, inner_color, outer_color);
+
+                    Vector2 pupille_position;
+
+                    Vector2 player_position = get_player_screen_position();
+
+                    pupille_position.x = player_position.x - eye_center.x;
+                    pupille_position.y = player_position.y - eye_center.y;
+
+                    pupille_position = normalize_vec2(pupille_position);
+
+                    pupille_position.x = eye_center.x + (pupille_position.x * pupille_offset);
+                    pupille_position.y = eye_center.y + (pupille_position.y * pupille_offset);
+
+                    DrawCircle(pupille_position.x, pupille_position.y, pupille_radius, pupille_color);
                 }
             }
         }
@@ -1394,89 +1362,181 @@ void render(void) {
         DrawLineEx(line_start, line_end, line_thickness, COLOR_GHOST_HOUSE_DOOR);
     }
 
-    for (int i = 0; i < GHOST_COUNT; i++) {
-        render_ghost(&state->ghosts[i]);
+}
+
+void render_player(void) {
+    Player *player = &state->player;
+
+    static float gap = 0.0f;
+
+    float start_angle = 0.0f;
+    float end_angle = 0.0f;
+
+    gap += GET_FRAME_TIME() * GAP_ANIMATION_SPEED;
+    if (gap > PI * 2) {
+        gap = 0.0f;
     }
 
-    render_player();
+    float base_angle = 0.0f;
+    switch (player->direction) {
+        case DIRECTION_RIGHT:
+            base_angle = 0.0f;
+            break;
+        case DIRECTION_UP:
+            base_angle = 270.0f;
+            break;
+        case DIRECTION_LEFT:
+            base_angle = 180.0f;
+            break;
+        case DIRECTION_DOWN:
+            base_angle = 90.0f;
+            break;
+    }
 
-    if (state->death_by_ghost) {
+    start_angle = (base_angle + 360.0f)
+        - ((cosf(gap) + 1.0f) * HALF_GAP_SIZE_MULTIPLIER);
+
+    end_angle = base_angle
+        + ((cosf(gap) + 1.0f) * HALF_GAP_SIZE_MULTIPLIER);
+
+    DrawCircleSector(get_player_screen_position(), (get_half_cell_size() * 0.9f), start_angle, end_angle, 16, COLOR_PLAYER);
+}
+
+void render_ghost(Ghost *ghost) {
+    Vector2 center = get_ghost_screen_position(ghost);
+
+    Color color = ghost->state == GHOST_STATE_FRIGHTENED ? COLOR_FRIGHTENED : ghost->color;
+
+    switch (ghost->state) {
+        default:
+            break;
+        case GHOST_STATE_FRIGHTENED:
+            if (!state->ghost_blinking) {
+                color.r /= 2;
+                color.g /= 2;
+                color.b /= 2;
+            }
+            break;
+        case GHOST_STATE_RETURNING:
+            break;
+    }
+
+    float eye_size = get_cell_size() / 6;
+    Color eye_color = (Color){255,255,255,255};
+
+    float pupille_size = get_cell_size() / 12;
+    float pupille_x = 0;
+    float pupille_y = 0;
+    Color pupille_color = (Color){0,0,0,255};
+
+    float pupille_offset = eye_size / 2;
+
+    if (ghost->state == GHOST_STATE_FRIGHTENED) {
+        float t = ghost->fraction_position * PI * 2;
+        pupille_x = pupille_offset * sinf(t);
+        pupille_y = pupille_offset * cosf(t);
+    } else {
+        switch (ghost->direction) {
+            case DIRECTION_RIGHT: pupille_x = pupille_offset; break;
+            case DIRECTION_UP: pupille_y = -pupille_offset; break;
+            case DIRECTION_LEFT: pupille_x = -pupille_offset; break;
+            case DIRECTION_DOWN: pupille_y = pupille_offset; break;
+        }
+    }
+
+    switch (ghost->shape) {
+        case GHOST_SHAPE_TRAPEZOID: {
+            if (ghost->state != GHOST_STATE_RETURNING) {
+                const float o = get_eighth_cell_size();
+                Vector2 tl = { center.x - (o*3), center.y - (o*3) };
+                Vector2 bl = { center.x - (o*4), center.y + (o*3) };
+                Vector2 br = { center.x + (o*4), bl.y };
+                Vector2 tr = { center.x + (o*3), tl.y };
+
+                DrawTriangle(tl, bl, br, color);
+                DrawTriangle(tl, br, tr, color);
+            }
+
+            float eye_left = center.x - eye_size;
+            float eye_right = center.x + eye_size;
+
+            DrawCircle(eye_left, center.y, eye_size, eye_color);
+            DrawCircle(eye_right, center.y, eye_size, eye_color);
+
+            DrawCircle(eye_left + pupille_x, center.y + pupille_y, pupille_size, pupille_color);
+            DrawCircle(eye_right + pupille_x, center.y + pupille_y, pupille_size, pupille_color);
+        } break;
+        case GHOST_SHAPE_TRIANGLE: {
+            if (ghost->state != GHOST_STATE_RETURNING) {
+                float d = (2.0f * PI) / 3.0f;
+                Vector2 v[3];
+                for (int i = 0; i < 3; i++) {
+                    float value = (d * i) + (state->global_sine_timer * d * 4);
+                    v[i] = (Vector2) {
+                        .x = center.x + (sinf(value) * get_half_cell_size()),
+                        .y = center.y + (cosf(value) * get_half_cell_size()),
+                    };
+                }
+                DrawTriangle(v[0], v[1], v[2], color);
+            }
+            DrawCircle(center.x, center.y, eye_size, eye_color);
+            DrawCircle(center.x + pupille_x, center.y + pupille_y, pupille_size, pupille_color);
+        } break;
+    }
+}
+
+void render(void) {
+    ClearBackground(COLOR_FLOOR);
+
+    if (state->level_intro < LEVEL_INTRO_LENGTH) {
+        const char *text = TextFormat("LEVEL %i", state->level_idx);
+        render_noise(text);
+        state->level_intro += GetFrameTime();
+    } else if (state->death_by_ghost) {
         static float death_timer = 0.0f;
         death_timer += GetFrameTime();
 
         if (death_timer < 1) {
-            float the_bigger_side = (GetScreenWidth() < GetScreenHeight()) ? GetScreenHeight() : GetScreenWidth();
-
-            float scale = the_bigger_side * death_timer * 2;
-
-            Rectangle src;
-            src.x = 0;
-            src.y = 0;
-            src.width = PNG_DIMENSIONS;
-            src.height = PNG_DIMENSIONS;
-
-            if (state->death_by_ghost->direction == DIRECTION_LEFT) {
-                src.x = PNG_DIMENSIONS;
-                src.width = -PNG_DIMENSIONS;
-            }
-
-            Rectangle dst;
-            dst.width = scale;
-            dst.height = scale;
-            dst.x = GetScreenWidth() / 2;
-            dst.y = GetScreenHeight() / 2;
-
-            Vector2 origin;
-            origin.x = dst.width / 2;
-            origin.y = dst.height / 2;
-
-            float rotation;
-            Color color = { 255, 255, 255, 255 };
-            switch (state->death_by_ghost->state) {
-                default:
-                    switch (state->death_by_ghost->direction) {
-                        case DIRECTION_RIGHT:
-                        case DIRECTION_LEFT: rotation = 0; break;
-                        case DIRECTION_UP: rotation = 270; break;
-                        case DIRECTION_DOWN: rotation = 90; break;
-                        default: ASSERT(false);
-                    }
-                    break;
-                case GHOST_STATE_FRIGHTENED:
-                    rotation = state->global_sine_timer * 360.0f;
-                    color.a = 128;
-                    break;
-                case GHOST_STATE_RETURNING:
-                    rotation = state->global_sine_timer * 360.0f * 4;
-                    color.a = 64;
-                    break;
-            }
-
-            DrawTexturePro(state->death_by_ghost->texture, src, dst, origin, rotation, color);
+            render_player();
+            render_ghost(state->death_by_ghost);
         } else {
             death_timer = 0;
             state->level_idx = 0;
-            level_setup();
+            init();
         }
-    }
+    } else {
+        render_level();
+
+        for (int i = 0; i < GHOST_COUNT; i++) {
+            render_ghost(&state->ghosts[i]);
+        }
+
+        render_player();
+
+        const char *score_text = TextFormat("%i", state->score);
+        GridPosition score_grid_position = { 9, 12 };
+        Vector2 score_position = to_screen(score_grid_position);
+        DrawText(score_text, score_position.x, score_position.y, 80, (Color){0,255,0,255});
 
 #if DEBUG
-    for (int i = 0; i < GHOST_COUNT; i++) {
-        Ghost *g = &state->ghosts[i];
-        debug_cell(g->target, g->color);
-        debug_line(g->position, g->target, g->color);
-    }
+        for (int i = 0; i < GHOST_COUNT; i++) {
+            Ghost *g = &state->ghosts[i];
+            debug_cell(g->target, g->color);
+            debug_line(g->position, g->target, g->color);
+        }
 #endif
+    }
 }
 
 int main(void) {
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-    InitWindow(40 * GRID_WIDTH, 40 * GRID_HEIGHT, "Mats Pac");
+    InitWindow(40 * GRID_WIDTH, 40 * GRID_HEIGHT, "Pac-Drug");
     SetWindowMinSize(GRID_WIDTH * 10, GRID_HEIGHT * 10);
     SetTargetFPS(60);
     state = (State *)calloc(sizeof(State), 1);
     init();
     while (!WindowShouldClose()) {
+        input();
         update();
         BeginDrawing();
         render();
